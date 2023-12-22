@@ -1,7 +1,9 @@
 package node
 
 import (
-	"github.com/maypok86/otter/internal/spinlock"
+	"runtime"
+	"sync/atomic"
+
 	"github.com/maypok86/otter/internal/unixtime"
 )
 
@@ -14,11 +16,12 @@ const (
 )
 
 type Node[K comparable, V any] struct {
-	key        K
-	value      V
-	prev       *Node[K, V]
-	next       *Node[K, V]
-	lock       spinlock.SpinLock
+	key   K
+	value V
+	prev  *Node[K, V]
+	next  *Node[K, V]
+	// lock       spinlock.SpinLock
+	seq        uint32
 	expiration uint32
 	hash       uint64
 	cost       uint32
@@ -41,7 +44,20 @@ func (n *Node[K, V]) Key() K {
 }
 
 func (n *Node[K, V]) Value() V {
-	return n.value
+	for {
+		seq := atomic.LoadUint32(&n.seq)
+		if seq&1 == 1 {
+			runtime.Gosched()
+			continue
+		}
+
+		value := n.value
+
+		newSeq := atomic.LoadUint32(&n.seq)
+		if seq == newSeq {
+			return value
+		}
+	}
 }
 
 func (n *Node[K, V]) SetValue(value V) {
@@ -49,11 +65,22 @@ func (n *Node[K, V]) SetValue(value V) {
 }
 
 func (n *Node[K, V]) Lock() {
-	n.lock.Lock()
+	for {
+		seq := atomic.LoadUint32(&n.seq)
+		if seq&1 == 1 {
+			runtime.Gosched()
+			continue
+		}
+
+		newSeq := seq + 1
+		if atomic.CompareAndSwapUint32(&n.seq, seq, newSeq) {
+			return
+		}
+	}
 }
 
 func (n *Node[K, V]) Unlock() {
-	n.lock.Unlock()
+	atomic.AddUint32(&n.seq, 1)
 }
 
 func (n *Node[K, V]) Hash() uint64 {
